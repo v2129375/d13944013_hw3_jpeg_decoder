@@ -241,39 +241,72 @@ class JPEGDecoder:
                 
                 print(f"读取量化表 {table_id}, 精度 {precision}")
                 
-                # 修正：每个表的大小应该是64字节（8位精度）或128字节（16位精度）
+                # 每个表的大小是64个值
                 table = []
                 bytes_per_value = 2 if precision else 1
                 
                 try:
-                    # 一次性读取所有数据
-                    table_data = file.read(64 * bytes_per_value)
-                    if len(table_data) != 64 * bytes_per_value:
-                        raise IOError(f"量化表数据不完整: 期望 {64 * bytes_per_value} 字节，实际读取 {len(table_data)} 字节")
-                    
-                    # 解析数据
-                    for i in range(0, len(table_data), bytes_per_value):
+                    # 分批读取数据以提高可靠性
+                    for _ in range(64):
                         if precision:
-                            value = (table_data[i] << 8) | table_data[i + 1]
+                            high = self.read_byte(file)
+                            low = self.read_byte(file)
+                            value = (high << 8) | low
                         else:
-                            value = table_data[i]
+                            value = self.read_byte(file)
                         table.append(value)
                     
+                    # 验证表的完整性
+                    if len(table) != 64:
+                        raise IOError(f"量化表 {table_id} 数据不完整: 只读取到 {len(table)} 个值")
+                    
+                    # 存储表
+                    self.quantization_tables[table_id] = table
+                    bytes_read += 1 + 64 * bytes_per_value
+                    
+                    print(f"成功读取量化表 {table_id}，包含 {len(table)} 个值")
+                    print(f"表的前几个值: {table[:8]}")  # 打印部分值用于调试
+                    
                 except Exception as e:
-                    print(f"读取量化表数据时出错：{str(e)}")
-                    # 如果读取失败，创建默认表
-                    table = [16] * 64  # 使用默认值16填充
-                
-                self.quantization_tables[table_id] = table
-                bytes_read += 1 + 64 * bytes_per_value
-                print(f"完成量化表 {table_id} 读取小 {len(table)} 项")
+                    print(f"读取量化表 {table_id} 时出错：{str(e)}")
+                    # 使用标准的JPEG默认量化表
+                    if table_id == 0:  # 亮度量化表
+                        table = [
+                            16, 11, 10, 16, 24, 40, 51, 61,
+                            12, 12, 14, 19, 26, 58, 60, 55,
+                            14, 13, 16, 24, 40, 57, 69, 56,
+                            14, 17, 22, 29, 51, 87, 80, 62,
+                            18, 22, 37, 56, 68, 109, 103, 77,
+                            24, 35, 55, 64, 81, 104, 113, 92,
+                            49, 64, 78, 87, 103, 121, 120, 101,
+                            72, 92, 95, 98, 112, 100, 103, 99
+                        ]
+                    else:  # 色度量化表
+                        table = [
+                            17, 18, 24, 47, 99, 99, 99, 99,
+                            18, 21, 26, 66, 99, 99, 99, 99,
+                            24, 26, 56, 99, 99, 99, 99, 99,
+                            47, 66, 99, 99, 99, 99, 99, 99,
+                            99, 99, 99, 99, 99, 99, 99, 99,
+                            99, 99, 99, 99, 99, 99, 99, 99,
+                            99, 99, 99, 99, 99, 99, 99, 99,
+                            99, 99, 99, 99, 99, 99, 99, 99
+                        ]
+                    self.quantization_tables[table_id] = table
+                    print(f"使用默认量化表 {table_id}")
+            
+            # 确保至少有基本的量化表
+            if 0 not in self.quantization_tables:
+                print("警告：缺少亮度量化表，使用默认表")
+                self.quantization_tables[0] = [16] * 64
+            if 1 not in self.quantization_tables:
+                print("警告：缺少色度量化表，使用默认表")
+                self.quantization_tables[1] = [16] * 64
             
         except Exception as e:
-            print(f"读取量化表时出错：{str(e)}")
-            # 确保至少有一个默认的量化表
-            if not self.quantization_tables:
-                self.quantization_tables[0] = [16] * 64
-                print("创建默认量化表")
+            print(f"读取量化表段时出错：{str(e)}")
+            # 确保有基本的量化表
+            self._ensure_default_quantization_tables()
 
     def _read_scan_data(self, file: BinaryIO) -> None:
         """读取扫描数据"""
@@ -357,7 +390,7 @@ class JPEGDecoder:
             
             if len(compressed_data) == 0:
                 print("警告：没有读取到压缩数据，使用测试数据")
-                # 使用一些测试数据以确保有位流
+                # 些测试数以保有位流
                 compressed_data = bytes([0x12, 0x34, 0x56, 0x78])
             
             # 将字节数据转换为位流
@@ -409,7 +442,7 @@ class JPEGDecoder:
                     
                     # 存储时使用最简形式（去掉不必要的前导零）
                     if bits == 1:
-                        binary = binary[-1]  # 对于1位编码，只保留最后一位
+                        binary = binary[-1]  # 对于1位编码，只保最后一位
                     else:
                         # 对于多位编码，保留所有必要的位
                         binary = binary.lstrip('0') if binary.lstrip('0') else '0'
@@ -598,7 +631,7 @@ class JPEGDecoder:
                 try:
                     self.read_markers(f)
                 except IOError as e:
-                    raise IOError(f"读取JPEG文件时出错：{str(e)}")
+                    raise IOError(f"读取JPEG文时出错：{str(e)}")
             
             # 准备扫描组件信息
             scan_components = []
@@ -682,7 +715,7 @@ class JPEGDecoder:
             print("BMP文件写入完成")
             
         except Exception as e:
-            print(f"解���过程中出错：{str(e)}")
+            print(f"解过程中出错：{str(e)}")
             raise
 
     def _decode_huffman_data(self, scan_components: List[Dict]) -> List[List[List[int]]]:
@@ -690,23 +723,16 @@ class JPEGDecoder:
         decoded_data = []
         mcu_rows = (self.height + 7) // 8
         mcu_cols = (self.width + 7) // 8
+        total_mcus = mcu_rows * mcu_cols
         
-        print(f"开始霍夫曼解码:")
-        print(f"MCU大小: {mcu_rows}x{mcu_cols}")
-        print(f"初始位流长度: {len(self.bits_data)}")
-        if len(self.bits_data) > 0:
-            print(f"位流前32位: {self.bits_data[:32]}")
-        print(f"扫描组件数量: {len(scan_components)}")
-        
-        # 保存原始位流
-        original_bits = self.bits_data.copy()
-        original_dc_pred = self.dc_pred.copy()
+        print("开始霍夫曼解码...")
         
         try:
             for mcu_row in range(mcu_rows):
                 for mcu_col in range(mcu_cols):
-                    print(f"\n处理MCU块 [{mcu_row},{mcu_col}]")
-                    print(f"当前位流长度: {len(self.bits_data)}")
+                    current_mcu = mcu_row * mcu_cols + mcu_col
+                    progress = (current_mcu / total_mcus) * 100
+                    print(f"\r霍夫曼解码进度: {progress:.1f}%", end='', flush=True)
                     
                     # 检查位流是否已耗尽
                     if len(self.bits_data) == 0:
@@ -729,8 +755,8 @@ class JPEGDecoder:
                         
                         mcu_data = []
                         for component in scan_components:
-                            print(f"处理组件 {component['id']}")
-                            print(f"使用DC表 {component['dc_table_id']}, AC表 {component['ac_table_id']}")
+                            # print(f"处理组件 {component['id']}")
+                            # print(f"使用DC表 {component['dc_table_id']}, AC表 {component['ac_table_id']}")
                             
                             block = self._decode_block(
                                 component['dc_table_id'],
@@ -738,7 +764,7 @@ class JPEGDecoder:
                                 component['id'] - 1
                             )
                             mcu_data.append(block)
-                            print(f"块解码完成，DC值: {block[0]}")
+                            # print(f"块解码完成，DC值: {block[0]}")
                         
                         decoded_data.append(mcu_data)
                         
@@ -751,28 +777,23 @@ class JPEGDecoder:
                         mcu_data = [[0] * 64 for _ in scan_components]
                         decoded_data.append(mcu_data)
             
+            print("\r霍夫曼解码进度: 100.0%")
             return decoded_data
             
         except Exception as e:
-            print(f"霍夫曼数据解码失败：{str(e)}")
-            print(f"最终位流长度: {len(self.bits_data)}")
-            # 恢复到初始状态
-            self.bits_data = original_bits
-            self.dc_pred = original_dc_pred
+            print(f"\n霍夫曼数据解码失败：{str(e)}")
             raise
 
     def _decode_block(self, dc_table_id: int, ac_table_id: int, component_id: int) -> List[int]:
         """解码一个8x8块"""
         block = [0] * 64
-        original_bits = None
         
         try:
             # 确保所有表都存在
             self._ensure_default_tables()
             
-            # 检查位流是否为空
             if len(self.bits_data) == 0:
-                return [0] * 64  # 如果位流为空，返回全零块
+                return [0] * 64
             
             # 保存原始位流状态
             original_bits = self.bits_data.copy()
@@ -781,16 +802,11 @@ class JPEGDecoder:
             try:
                 # 解码DC系数
                 dc_value = self._decode_dc_coefficient(dc_table_id)
-                # 限制DC预测值的范围
                 self.dc_pred[component_id] = max(-2048, min(2047, self.dc_pred[component_id] + dc_value))
                 block[0] = self.dc_pred[component_id]
                 
                 # 解码AC系数
-                if not self._decode_ac_coefficients(ac_table_id, block):
-                    print(f"AC系数解码失败，使用默认值")
-                    # AC解码失败时，保留DC值，其他设为0
-                    for i in range(1, 64):
-                        block[i] = 0
+                self._decode_ac_coefficients(ac_table_id, block)
                 
                 # 限制所有系数的范围
                 for i in range(64):
@@ -799,120 +815,102 @@ class JPEGDecoder:
                 return block
                 
             except Exception as e:
-                # 如果解码失败，恢复原始状态
-                if original_bits is not None:
-                    self.bits_data = original_bits
-                    self.dc_pred[component_id] = original_dc_pred
+                # 解码失败时恢复状态
+                self.bits_data = original_bits
+                self.dc_pred[component_id] = original_dc_pred
                 raise
             
         except Exception as e:
-            print(f"块解码错误：{str(e)}, DC表ID: {dc_table_id}, AC表ID: {ac_table_id}")
+            print(f"块解码错误：{str(e)}")
             return [0] * 64
 
     def _decode_ac_coefficients(self, table_id: int, block: List[int]) -> bool:
         """解码AC系数"""
-        code = ''
         try:
             ac_table = self.huffman_tables['ac'][table_id]
-            if not ac_table:
-                print(f"AC表 {table_id} 为空")
-                return False
-            
-            pos = 1
-            max_length = min(16, max(len(k) for k in ac_table.keys()))  # 限制最大长度为16位
+            pos = 1  # 从第二个位置开始（跳过DC）
             
             while pos < 64:
-                code = ''
-                original_bits = self.bits_data.copy()
-                found_code = False
-                
                 # 读取霍夫曼编码
-                for _ in range(max_length):
+                code = ''
+                value = None
+                max_code_length = 16
+                
+                for _ in range(max_code_length):
                     if len(self.bits_data) == 0:
-                        # 位流结束，将剩余系数设为0
-                        while pos < 64:
-                            block[pos] = 0
-                            pos += 1
-                        return True
+                        return True  # 位流结束，认为解码成功
                     
                     code += str(self.bits_data[0])
                     self.bits_data = self.bits_data[1:]
                     
                     if code in ac_table:
                         value = ac_table[code]
-                        found_code = True
-                        
-                        if value == 0x00:  # EOB
-                            while pos < 64:
-                                block[pos] = 0
-                                pos += 1
-                            return True
-                        
-                        run_length = (value >> 4) & 0x0F
-                        size = value & 0x0F
-                        
-                        new_pos = pos + run_length
-                        if new_pos >= 64:
-                            self.bits_data = original_bits
-                            while pos < 64:
-                                block[pos] = 0
-                                pos += 1
-                            return True
-                        
-                        pos = new_pos
-                        
-                        if size > 0:
-                            if len(self.bits_data) < size:
-                                self.bits_data = original_bits
-                                while pos < 64:
-                                    block[pos] = 0
-                                    pos += 1
-                                return True
-                            
-                            coeff = 0
-                            for _ in range(min(size, len(self.bits_data))):  # 防止读取过多位
-                                coeff = (coeff << 1) | self.bits_data[0]
-                                self.bits_data = self.bits_data[1:]
-                            
-                            if coeff < (1 << (size - 1)):
-                                coeff = coeff - (1 << size) + 1
-                            
-                            block[pos] = coeff
-                        
-                        pos += 1
                         break
                 
-                if not found_code:
-                    # 未找到编码时，将剩余系数设为0
+                if value is None:
+                    # 如果没有找到匹配的编码，填充剩余位置为0并返回
                     while pos < 64:
                         block[pos] = 0
                         pos += 1
                     return True
+                
+                run_length = (value >> 4) & 0x0F  # 高4位是连续0的个数
+                size = value & 0x0F  # 低4位是振幅的位数
+                
+                if value == 0x00:  # EOB标记
+                    while pos < 64:
+                        block[pos] = 0
+                        pos += 1
+                    return True
+                    
+                if value == 0xF0:  # ZRL标记（16个连续的0）
+                    pos += 16
+                    if pos >= 64:  # 检查是否超出范围
+                        return True
+                    continue
+                
+                pos += run_length  # 跳过run_length个0
+                
+                if pos >= 64:  # 检查是否超出块范围
+                    return True
+                
+                if size > 0:
+                    if len(self.bits_data) < size:
+                        return True
+                    
+                    # 读取size位的振幅值
+                    amplitude = 0
+                    first_bit = self.bits_data[0]
+                    
+                    for _ in range(size):
+                        amplitude = (amplitude << 1) | self.bits_data[0]
+                        self.bits_data = self.bits_data[1:]
+                    
+                    # 处理负数情况
+                    if first_bit == 0 and amplitude != 0:
+                        amplitude = amplitude - (1 << size) + 1
+                    
+                    block[pos] = amplitude
+                
+                pos += 1
             
             return True
             
         except Exception as e:
-            print(f"AC解码错误：{str(e)}, 表ID: {table_id}, 当前代码: {code}")
+            print(f"AC解码错误：{str(e)}")
             return False
 
     def _decode_dc_coefficient(self, table_id: int) -> int:
         """解码DC系数"""
-        code = ''
         try:
-            dc_table = self.huffman_tables['dc'][table_id & 0x01]  # 使用基础表ID
-            if not dc_table:
-                print(f"DC表 {table_id} 为空，使用默认值")
-                return 0
-            
-            if len(self.bits_data) == 0:
-                print("位流为空，使用默认值")
-                return 0
-            
-            max_length = min(16, max(len(k) for k in dc_table.keys()))  # 限制最大长度为16位
-            original_bits = self.bits_data.copy()
+            dc_table = self.huffman_tables['dc'][table_id]
+            code = ''
+            value = None
+            max_code_length = 16
+            original_bits = self.bits_data.copy()  # 保存原始位流
             
             # 读取霍夫曼编码
-            for _ in range(max_length):
+            for _ in range(max_code_length):
                 if len(self.bits_data) == 0:
                     self.bits_data = original_bits
                     return 0
@@ -921,49 +919,42 @@ class JPEGDecoder:
                 self.bits_data = self.bits_data[1:]
                 
                 if code in dc_table:
-                    size = dc_table[code]
-                    if size == 0:
-                        return 0
-                    
-                    # 检查是否有足够的位来读取差分值
-                    if len(self.bits_data) < size:
-                        print(f"位流数据不足以读取差分值，需要{size}位，但只有{len(self.bits_data)}位")
-                        self.bits_data = original_bits
-                        return 0
-                    
-                    # 读取size位的值
-                    value = 0
-                    first_bit = self.bits_data[0]  # 保存第一位，用于判断正负
-                    
-                    # 读取size位的值
-                    for i in range(size):
-                        value = (value << 1) | self.bits_data[0]
-                        self.bits_data = self.bits_data[1:]
-                    
-                    # 处理差分值
-                    if size > 0:
-                        if first_bit == 0:  # 负数
-                            value = value - (1 << size) + 1
-                    
-                    # 限制DC值的范围
-                    value = max(-2048, min(2047, value))  # 限制在12位范围内
-                    
-                    return value
+                    value = dc_table[code]
+                    break
             
-            # 如果没有找到匹配的编码，尝试使用短编码
-            if len(code) > 2:
-                short_code = code[:2]
-                if short_code in dc_table:
-                    print(f"使用短编码 {short_code} 替代 {code}")
-                    self.bits_data = original_bits[2:]  # 只使用前两位
-                    return dc_table[short_code]
+            if value is None:
+                self.bits_data = original_bits
+                return 0
             
-            print(f"未找到匹配的DC霍夫曼编��: {code}")
-            self.bits_data = original_bits
+            # 读取差分值的位数
+            size = value
+            if size == 0:
+                return 0
+            
+            # 确保有足够的位来读取差分值
+            if len(self.bits_data) < size:
+                self.bits_data = original_bits
+                return 0
+            
+            # 读取size位的差分值
+            diff = 0
+            first_bit = self.bits_data[0]
+            
+            for _ in range(size):
+                diff = (diff << 1) | self.bits_data[0]
+                self.bits_data = self.bits_data[1:]
+            
+            # 处理差分值
+            if size > 0:
+                if first_bit == 1:  # 正数
+                    return diff
+                else:  # 负数
+                    return diff - ((1 << size) - 1)
+            
             return 0
             
         except Exception as e:
-            print(f"DC解码错误：{str(e)}, 表ID: {table_id}, 当前码: {code}")
+            print(f"DC解码错误：{str(e)}")
             if 'original_bits' in locals():
                 self.bits_data = original_bits
             return 0
@@ -991,8 +982,11 @@ class JPEGDecoder:
         """反量化处理"""
         try:
             dequantized_data = {}
+            total_components = len(self.components)
             
-            for component in self.components:
+            print("\n开始反量化处理...")
+            
+            for idx, component in enumerate(self.components):
                 comp_id = component['id']
                 qt_table_id = component['qt_table_id']
                 
@@ -1042,10 +1036,11 @@ class JPEGDecoder:
                 dequantized_data[comp_id] = dequantized
                 print(f"完成组件 {comp_id} 的反量化")
             
+            print("\r反量化处理进度: 100.0%")
             return dequantized_data
             
         except Exception as e:
-            print(f"反量化处理时出错：{str(e)}")
+            print(f"\n反量化处理时出错：{str(e)}")
             # 创建默认的反量化数据
             default_data = {}
             for component in self.components:
@@ -1057,9 +1052,15 @@ class JPEGDecoder:
     def _idct_transform(self) -> Dict[int, List[List[float]]]:
         """IDCT变换"""
         idct_data = {}
+        total_components = len(self.components)
         
-        for component in self.components:
+        print("\n开始IDCT变换...")
+        
+        for idx, component in enumerate(self.components):
             comp_id = component['id']
+            comp_progress = (idx / total_components) * 100
+            print(f"\rIDCT变换总进度: {comp_progress:.1f}%", end='', flush=True)
+            
             height = len(self.dequantized_data[comp_id])
             width = len(self.dequantized_data[comp_id][0])
             
@@ -1112,11 +1113,14 @@ class JPEGDecoder:
             idct_data[comp_id] = output_data.astype(np.uint8).tolist()
             print(f"完成组件 {comp_id} 的IDCT变换")
         
+        print("\rIDCT变换总进度: 100.0%")
         return idct_data
 
     def _color_convert(self) -> List[List[List[int]]]:
         """YCbCr转RGB颜色空间转换"""
         try:
+            print("\n开始颜色空间转换...")
+            
             # 将YCbCr数据转换为NumPy数组
             y_data = np.array(self.idct_data[1], dtype=np.float32)
             cb_data = np.array(self.idct_data[2], dtype=np.float32)
@@ -1161,10 +1165,11 @@ class JPEGDecoder:
             rgb_data[:,:,1] = np.clip(y_data - 0.344136 * (cb_resized - 128) - 0.714136 * (cr_resized - 128), 0, 255)  # G
             rgb_data[:,:,2] = np.clip(y_data + 1.772 * (cb_resized - 128), 0, 255)  # B
             
+            print("\r颜色空间转换进度: 100.0%")
             return rgb_data.tolist()
             
         except Exception as e:
-            print(f"颜色转换错误：")
+            print(f"\n颜色空间转换错误：{str(e)}")
             print(f"Y形状={y_data.shape if 'y_data' in locals() else 'undefined'}")
             print(f"Cb形状={cb_data.shape if 'cb_data' in locals() else 'undefined'}")
             print(f"Cr形状={cr_data.shape if 'cr_data' in locals() else 'undefined'}")
@@ -1212,6 +1217,37 @@ class JPEGDecoder:
                 if padding_size > 0:
                     f.write(padding)
 
+    def _ensure_default_quantization_tables(self):
+        """确保存在默认的量化表"""
+        # 标准亮度量化表
+        luminance_table = [
+            16, 11, 10, 16, 24, 40, 51, 61,
+            12, 12, 14, 19, 26, 58, 60, 55,
+            14, 13, 16, 24, 40, 57, 69, 56,
+            14, 17, 22, 29, 51, 87, 80, 62,
+            18, 22, 37, 56, 68, 109, 103, 77,
+            24, 35, 55, 64, 81, 104, 113, 92,
+            49, 64, 78, 87, 103, 121, 120, 101,
+            72, 92, 95, 98, 112, 100, 103, 99
+        ]
+        
+        # 标准色度量化表
+        chrominance_table = [
+            17, 18, 24, 47, 99, 99, 99, 99,
+            18, 21, 26, 66, 99, 99, 99, 99,
+            24, 26, 56, 99, 99, 99, 99, 99,
+            47, 66, 99, 99, 99, 99, 99, 99,
+            99, 99, 99, 99, 99, 99, 99, 99,
+            99, 99, 99, 99, 99, 99, 99, 99,
+            99, 99, 99, 99, 99, 99, 99, 99,
+            99, 99, 99, 99, 99, 99, 99, 99
+        ]
+        
+        if 0 not in self.quantization_tables:
+            self.quantization_tables[0] = luminance_table
+        if 1 not in self.quantization_tables:
+            self.quantization_tables[1] = chrominance_table
+
 def main():
     try:
         decoder = JPEGDecoder()
@@ -1227,7 +1263,7 @@ def main():
                 break
         
         if input_file is None:
-            raise FileNotFoundError("找不到JPEG图片文件，请确保图片文件名为'input'且扩展名为.jpg或.jpeg")
+            raise FileNotFoundError("找不到JPEG片文件，请确保图片文件名为'input'且扩展名为.jpg或.jpeg")
             
         output_path = os.path.join(current_dir, 'output.bmp')
         
