@@ -1030,7 +1030,7 @@ def main():
             # 单文件模式
             decoder = JPEGDecoder()
             decoder.SWITCH = SWITCH
-            decoder.decode('gig-sn01.jpg', 'gig-sn01.bmp')
+            decoder.decode('gig-sn08.jpg', 'gig-sn08.bmp')
         else:
             # 多文件模式
             jpeg_files = [
